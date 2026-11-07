@@ -30,8 +30,9 @@ python recora.py
 
 ## පාවිච්චි කරන හැටි
 
-- **F9** = Start / Stop (window එක hide වෙලා තිබුණත් වැඩ).
-- Start කළාම 3-2-1 countdown එකක් දීලා window එක minimize වෙනවා — recording එකට එන්නේ නෑ.
+- **F9** හෝ **Ctrl + Alt + R** = Start / Stop (window එක hide වෙලා තිබුණත් වැඩ). Laptop එකේ F9 එක Fn නැතුව brightness/media key එකක් නම් Ctrl + Alt + R පාවිච්චි කරන්න.
+- RECORA window එක screen capture එකෙන් exclude කරලා තියෙන්නේ — screen එකේ ඔයාට පේනවා, නමුත් video එකට එන්නේ නෑ (Windows 10 2004+ / Windows 11).
+- Start කළාම 3-2-1 countdown එකක් දීලා window එක minimize වෙනවා (ඕන නැත්නම් "Hide this window" untick කරලා window එකේම Stop ඔබන්න පුළුවන්).
 - **System sound** = JARVIS voice එක. **Microphone** = ඔයාගේ කටහඬ (JARVIS එක්ක කතා කරන demo එකකට on කරන්න).
 - Recordings save වෙන්නේ `Videos\RECORA` එකට (`Change` එකෙන් වෙනස් කරන්න පුළුවන්). File name: `RECORA_YYYY-MM-DD_HH-MM-SS.mp4`.
 - පළමු වතාවට open කළාම තත්පර කීපයක් GPU encoder එක check කරනවා. යටින් **Encoder:** line එකේ කොළ පාටින් `(GPU) ✓` පෙන්නුවොත් හරි.
@@ -44,7 +45,8 @@ python recora.py
 | Sound නෑ | Windows එකේ default speaker එක තමයි record වෙන්නේ. JARVIS play වෙන්නේ ඒ device එකෙන්ද බලන්න. |
 | Sound ටිකක් ඉස්සරහින් / පස්සෙන් | `%APPDATA%\RECORA\config.json` එකේ `audio_offset_ms` වෙනස් කරන්න (උදා: `150` = sound 0.15s පස්සට, `-150` = ඉස්සරහට). |
 | Mic sound එක අඩුයි | `config.json` එකේ `mic_volume` වැඩි කරන්න (උදා: `1.8`). |
-| F9 වැඩ නෑ | වෙන app එකක් F9 අරන්. Button එකෙන් Start/Stop කරන්න. |
+| F9 වැඩ නෑ | Ctrl + Alt + R පාවිච්චි කරන්න. Button එක යටින් වැඩ කරන hotkeys මොනවද කියලා පෙන්නනවා. |
+| Video එක සුදු ගතියි (washed out) | v1.1 එකෙන් fix කළා — colours BT.709 limited range විදිහට හරියට convert කරලා label කරනවා. |
 
 ## JARVIS voice එක තවත් smooth කරගන්න tips
 - Xbox Game Bar එකේ **"Record in the background"** off කරන්න (Settings → Gaming → Captures).

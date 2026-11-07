@@ -13,8 +13,9 @@ Why it stays light (and why JARVIS's voice won't shake):
 * System sound is copied with WASAPI loopback straight into a WAV file: no
   resampling, no effects, and nothing touches the playback path.
 * Video and sound are joined into one MP4 only after you press Stop.
+* The RECORA window is excluded from capture, so it never appears in the video.
 
-Hotkey: F9 = start / stop (works while the window is hidden).
+Hotkeys: F9 or Ctrl+Alt+R = start / stop (work while the window is hidden).
 """
 
 import os
@@ -38,7 +39,8 @@ except Exception:                             # pragma: no cover
 IS_WIN = os.name == "nt"
 
 APP_NAME = "RECORA"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
+ENCODER_CACHE_REV = "2"      # bump to force a fresh encoder check after an update
 
 CREATE_NO_WINDOW = 0x08000000
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
@@ -79,7 +81,8 @@ def find_ffmpeg():
 
 def ffmpeg_signature(path):
     try:
-        return "%s|%d|%d" % (path, os.path.getsize(path), int(os.path.getmtime(path)))
+        return "%s|%d|%d|r%s" % (path, os.path.getsize(path), int(os.path.getmtime(path)),
+                                 ENCODER_CACHE_REV)
     except OSError:
         return None
 
@@ -121,6 +124,20 @@ def save_config(cfg):
 
 
 # -------------------------------------------------------------- encoders ----
+# Colour: the screen is full-range RGB. Every path converts it to standard
+# BT.709 *limited*-range YUV and labels the stream exactly that way. (v1.0 let
+# the RGB "full range" label leak onto limited-range video, so players lifted
+# the blacks and the picture looked washed out / whitish.)
+COLOR_TAGS = ["-color_range", "tv", "-colorspace", "bt709",
+              "-color_primaries", "bt709", "-color_trc", "bt709"]
+VUI_BSF = ("h264_metadata=video_full_range_flag=0:colour_primaries=1:"
+           "transfer_characteristics=1:matrix_coefficients=1")
+COLOR_OUT = COLOR_TAGS + ["-bsf:v", VUI_BSF]
+QSV_709 = ("vpp_qsv=format=nv12:out_range=tv:out_color_matrix=bt709:"
+           "out_color_primaries=bt709:out_color_transfer=bt709")
+SW_709 = "scale=out_color_matrix=bt709:out_range=tv"
+QSV_ENC = ["-c:v", "h264_qsv", "-preset", "veryfast", "-q:v", "25"]
+
 # Tried in this order; the first one that really encodes a test clip wins.
 # "post" is appended to the ddagrab filter (GPU frames come out of ddagrab).
 ENCODERS = [
@@ -128,22 +145,23 @@ ENCODERS = [
      "enc": ["-c:v", "h264_nvenc", "-preset", "p3", "-rc", "vbr", "-cq", "24", "-b:v", "0"]},
     {"id": "qsv_vpp", "label": "Intel Quick Sync (GPU)", "gpu": True,
      "pre": ["-init_hw_device", "d3d11va=dx", "-filter_hw_device", "dx"],
-     "post": ",hwmap=derive_device=qsv,format=qsv,vpp_qsv=format=nv12",
-     "enc": ["-c:v", "h264_qsv", "-preset", "veryfast", "-q:v", "25"]},
+     "post": ",hwmap=derive_device=qsv,format=qsv," + QSV_709, "enc": QSV_ENC},
+    {"id": "qsv_vpp_basic", "label": "Intel Quick Sync (GPU)", "gpu": True,
+     "pre": ["-init_hw_device", "d3d11va=dx", "-filter_hw_device", "dx"],
+     "post": ",hwmap=derive_device=qsv,format=qsv,vpp_qsv=format=nv12", "enc": QSV_ENC},
     {"id": "qsv", "label": "Intel Quick Sync (GPU)", "gpu": True, "pre": [],
-     "post": ",hwmap=derive_device=qsv,format=qsv",
-     "enc": ["-c:v", "h264_qsv", "-preset", "veryfast", "-q:v", "25"]},
+     "post": ",hwmap=derive_device=qsv,format=qsv", "enc": QSV_ENC},
     {"id": "amf", "label": "AMD AMF (GPU)", "gpu": True, "pre": [], "post": "",
      "enc": ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "24", "-qp_p", "26"]},
     {"id": "mf", "label": "Windows Media Foundation (GPU)", "gpu": True, "pre": [],
-     "post": ",hwdownload,format=bgra,format=nv12",
+     "post": ",hwdownload,format=bgra,%s,format=nv12" % SW_709,
      "enc": ["-c:v", "h264_mf", "-hw_encoding", "1", "-b:v", "8M"]},
     {"id": "x264", "label": "CPU x264 (fallback, heavier)", "gpu": False, "pre": [],
-     "post": ",hwdownload,format=bgra,format=yuv420p",
+     "post": ",hwdownload,format=bgra,%s,format=yuv420p" % SW_709,
      "enc": ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-threads", "2"]},
     {"id": "gdi_x264", "label": "CPU x264 + GDI (last resort)", "gpu": False, "gdi": True,
-     "enc": ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-threads", "2",
-             "-pix_fmt", "yuv420p"]},
+     "enc": ["-vf", SW_709 + ",format=yuv420p",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-threads", "2"]},
 ]
 ENCODER_BY_ID = {e["id"]: e for e in ENCODERS}
 
@@ -161,7 +179,9 @@ def video_cmd(ffmpeg, enc, fps, monitor, out_path=None, test_frames=None):
         cmd += list(enc["pre"]) + ["-filter_complex", graph, "-map", "[v]"]
     if test_frames:
         cmd += ["-frames:v", str(test_frames)]
-    cmd += list(enc["enc"]) + ["-g", str(int(fps) * 2)]
+    # the bitstream filter only rewrites the H.264 header labels - no filter
+    # negotiation, so it can never break a GPU pipeline
+    cmd += list(enc["enc"]) + ["-g", str(int(fps) * 2), "-bsf:v", VUI_BSF]
     if test_frames:
         cmd += ["-f", "null", "-"]
     else:
@@ -177,8 +197,11 @@ def mux_cmd(ffmpeg, video, system_wav, mic_wav, out_path, offset_ms=0, mic_volum
         if path and os.path.isfile(path) and os.path.getsize(path) > 4096:
             tracks.append(kind)
             cmd += ["-i", path]
+    # stream copy, but make sure both the H.264 header and the MP4 box say
+    # "BT.709 limited range" so every player shows the true colours
+    vcopy = ["-c:v", "copy"] + COLOR_OUT
     if not tracks:
-        return cmd + ["-map", "0:v", "-c:v", "copy", "-movflags", "+faststart", out_path]
+        return cmd + ["-map", "0:v"] + vcopy + ["-movflags", "+faststart", out_path]
 
     # sync nudge: + delays the sound, - starts the sound earlier
     offset_ms = int(offset_ms or 0)
@@ -194,9 +217,9 @@ def mux_cmd(ffmpeg, video, system_wav, mic_wav, out_path, offset_ms=0, mic_volum
     else:
         graph = ("[1:a]%sanull[s];[2:a]%s%sanull[m];"
                  "[s][m]amix=inputs=2:duration=longest:normalize=0,apad[a]" % (shift, shift, vol))
-    return cmd + ["-filter_complex", graph, "-map", "0:v", "-map", "[a]",
-                  "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
-                  "-shortest", "-movflags", "+faststart", out_path]
+    return cmd + ["-filter_complex", graph, "-map", "0:v", "-map", "[a]"] + vcopy + [
+        "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+        "-shortest", "-movflags", "+faststart", out_path]
 
 
 def popen_flags():
@@ -486,7 +509,7 @@ class RecordingSession:
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def stop_and_save(self, progress=None):
+    def stop_and_save(self, progress=None, on_video_stopped=None):
         # 1) stop video cleanly ('q' lets FFmpeg finish the file)
         if self.proc is not None:
             if self.proc.poll() is None:
@@ -503,6 +526,8 @@ class RecordingSession:
                         self.proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         pass
+        if on_video_stopped:
+            on_video_stopped()          # screen is no longer recorded - safe to show the window
         # 2) stop sound (after video, so sound is never shorter than video)
         sys_wav = mic_wav = None
         if self.audio:
@@ -532,34 +557,67 @@ class RecordingSession:
 
 
 # ------------------------------------------------------- windows helpers ----
-class HotkeyThread(threading.Thread):
-    """Global hotkey (default F9) through RegisterHotKey - no extra libraries."""
+MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
+# Two hotkeys: F9, plus Ctrl+Alt+R. Many laptops send F9 only with the Fn key
+# (F9 alone = brightness/media), and another app may already own F9 - letters
+# with Ctrl+Alt work on every keyboard.
+HOTKEYS = [
+    (1, MOD_NOREPEAT, 0x78, "F9"),
+    (2, MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x52, "Ctrl+Alt+R"),
+]
 
-    def __init__(self, callback, vk=0x78):
+
+class HotkeyThread(threading.Thread):
+    """Global hotkeys through RegisterHotKey - no extra libraries."""
+
+    def __init__(self, callback, keys=HOTKEYS):
         super().__init__(daemon=True)
         self.callback = callback
-        self.vk = vk
-        self.ok = False
+        self.keys = keys
+        self.registered = []          # names that really got registered
         self.tid = None
         self.ready = threading.Event()
+
+    @property
+    def ok(self):
+        return bool(self.registered)
 
     def run(self):
         from ctypes import wintypes
         user32 = ctypes.windll.user32
         self.tid = ctypes.windll.kernel32.GetCurrentThreadId()
-        self.ok = bool(user32.RegisterHotKey(None, 1, 0x4000, self.vk))   # MOD_NOREPEAT
+        ids = []
+        for hid, mods, vk, name in self.keys:
+            if user32.RegisterHotKey(None, hid, mods, vk):
+                ids.append(hid)
+                self.registered.append(name)
         self.ready.set()
-        if not self.ok:
+        if not ids:
             return
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == 0x0312:                                     # WM_HOTKEY
                 self.callback()
-        user32.UnregisterHotKey(None, 1)
+        for hid in ids:
+            user32.UnregisterHotKey(None, hid)
 
     def stop(self):
         if self.tid:
             ctypes.windll.user32.PostThreadMessageW(self.tid, 0x0012, 0, 0)   # WM_QUIT
+
+
+def exclude_from_capture(hwnd):
+    """Make a window invisible to screen capture (Windows 10 2004+ / 11).
+
+    It stays visible on the real screen, but Desktop Duplication (what ddagrab
+    uses) leaves it out, so the RECORA window never shows up in a recording.
+    """
+    if not IS_WIN or not hwnd:
+        return False
+    try:
+        return bool(ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x11))  # WDA_EXCLUDEFROMCAPTURE
+    except Exception:
+        return False
 
 
 def monitor_count():
@@ -641,12 +699,29 @@ class App:
             self.hotkey = HotkeyThread(lambda: self.events.put(("hotkey", None)))
             self.hotkey.start()
             self.hotkey.ready.wait(1.0)
-            if not self.hotkey.ok:
-                self._status("F9 is used by another app - use the button instead.", AMBER)
+            if self.hotkey.ok:
+                self.lbl_keys.configure(
+                    text="%s   start / stop" % "   or   ".join(self.hotkey.registered))
+            else:
+                self.lbl_keys.configure(text="Hotkeys are taken by another app - use the button",
+                                        fg=AMBER)
 
+        self.excluded = False
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(150, self._poll)
+        self.root.after(300, self._apply_capture_exclusion)
         self._init_encoder()
+
+    def _apply_capture_exclusion(self):
+        hwnd = None
+        try:
+            hwnd = int(self.root.wm_frame(), 16)          # the real top-level window
+        except Exception:
+            try:
+                hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            except Exception:
+                hwnd = None
+        self.excluded = exclude_from_capture(hwnd)
 
     # ---------------------------------------------------------- widgets
     def _build_ui(self):
@@ -679,11 +754,14 @@ class App:
         self.timer = tk.Label(r, text="00:00:00", bg=BG, fg=FG, font=("Consolas", 30, "bold"))
         self.timer.pack(pady=(4, 2))
 
-        self.btn = tk.Button(r, text="●   START    (F9)", command=self.toggle,
+        self.btn = tk.Button(r, text="●   START", command=self.toggle,
                              bg=RED, fg="white", activebackground=RED_DARK,
                              activeforeground="white", relief="flat", bd=0,
                              font=(FONT, 13, "bold"), cursor="hand2", pady=10)
-        self.btn.pack(fill="x", padx=18, pady=(4, 12))
+        self.btn.pack(fill="x", padx=18, pady=(4, 4))
+        self.lbl_keys = tk.Label(r, text="F9   or   Ctrl+Alt+R   start / stop", bg=BG,
+                                 fg=MUTED, font=(FONT, 9))
+        self.lbl_keys.pack(pady=(0, 10))
 
         card = tk.Frame(r, bg=CARD, highlightthickness=1, highlightbackground=LINE)
         card.pack(fill="x", padx=18)
@@ -800,13 +878,13 @@ class App:
 
     def _set_button(self, mode):
         if mode == "start":
-            self.btn.configure(text="●   START    (F9)", bg=RED, fg="white",
+            self.btn.configure(text="●   START", bg=RED, fg="white",
                                activebackground=RED_DARK, state="normal")
         elif mode == "stop":
-            self.btn.configure(text="■   STOP    (F9)", bg=STOP_BG, fg="#111",
+            self.btn.configure(text="■   STOP", bg=STOP_BG, fg="#111",
                                activebackground="#cfd3dc", state="normal")
         elif mode == "cancel":
-            self.btn.configure(text="Cancel    (F9)", bg=LINE, fg=FG,
+            self.btn.configure(text="Cancel", bg=LINE, fg=FG,
                                activebackground="#323a4c", state="normal")
         else:
             self.btn.configure(text=mode, bg=LINE, fg=MUTED, state="disabled")
@@ -931,7 +1009,8 @@ class App:
         if sess.warnings:
             self._status("Recording  •  " + "; ".join(sess.warnings), AMBER)
         else:
-            self._status("Recording...  press F9 to stop.", RED)
+            keys = " or ".join(self.hotkey.registered) if self.hotkey and self.hotkey.ok else ""
+            self._status("Recording...  press %s to stop." % keys if keys else "Recording...", RED)
 
     def _on_start_failed(self, msg):
         self.state = "idle"
@@ -952,14 +1031,16 @@ class App:
         self._set_button("Saving...")
         self.dot.configure(fg=AMBER)
         self._status("Saving...")
-        self._restore_window()
         self.root.title(APP_NAME)
         keep_awake(False)
         sess = self.session
 
         def work():
             try:
-                path = sess.stop_and_save(progress=lambda t: self.events.put(("progress", t)))
+                # the window comes back only after FFmpeg has stopped grabbing the screen
+                path = sess.stop_and_save(
+                    progress=lambda t: self.events.put(("progress", t)),
+                    on_video_stopped=lambda: self.events.put(("video_stopped", None)))
                 self.events.put(("saved", path))
             except Exception as exc:
                 self.events.put(("save_failed", str(exc)))
@@ -1002,6 +1083,8 @@ class App:
                     self._on_started(data)
                 elif kind == "start_failed":
                     self._on_start_failed(data)
+                elif kind == "video_stopped":
+                    self._restore_window()
                 elif kind == "progress":
                     self._status(data)
                 elif kind == "saved":
@@ -1010,6 +1093,7 @@ class App:
                     self._status("Saved ✓  " + os.path.basename(data), GREEN)
                     self._after_save()
                 elif kind == "save_failed":
+                    self._restore_window()
                     self._status("Saving failed.", RED)
                     self.messagebox.showerror(APP_NAME, data[-1500:])
                     self._after_save()
